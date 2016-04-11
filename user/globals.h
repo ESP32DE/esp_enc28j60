@@ -11,7 +11,7 @@
 
   //#define USE_DNS
   
-  #define ENC_RESET_TIMEOUT (MQTT_KEEPALIVE+5)
+  #define ENC_RESET_TIMEOUT 10
   
 
 #endif /* _GLOBALS_H */
