@@ -3,6 +3,8 @@
 
 This project adds the ENC28J60 to the ESP8266, and allows Sprites HTTPD functionality via the wired connection.
 
+Forum discussion - http://www.esp8266.com/viewtopic.php?f=11&t=9413
+
 ![alt tag](https://github.com/Cicero-MF/esp_enc28j60/blob/master/ethernet%20to%20esp%20wiring.png)
 
 **Disclaimer:** This initial release is a bit rushed, and isn't in the state I would like it to be, so please treat it as a work in progress.  I'd love contributions, questions and community input to make it solid.  Please also bear in mind I am running an older version of the SDK, so you may have some minor compile problems.
