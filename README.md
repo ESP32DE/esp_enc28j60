@@ -7,7 +7,7 @@ Forum discussion - http://www.esp8266.com/viewtopic.php?f=11&t=9413
 
 ![alt tag](https://github.com/Cicero-MF/esp_enc28j60/blob/master/ethernet%20to%20esp%20wiring.png)
 
-**Disclaimer:** This initial release is a bit rushed, and isn't in the state I would like it to be, so please treat it as a work in progress.  I'd love contributions, questions and community input to make it solid.  Please also bear in mind I am running an older version of the SDK, so you may have some minor compile problems.
+**Disclaimer:** This initial release is a bit rushed, and isn't in the state I would like it to be, so please treat it as a work in progress.  I'd love contributions, questions and community input to make it solid.  Please also bear in mind I am running an older version of the SDK, so you may have some minor compile problems.  I was using the SDK v1.0.1 24-04-2015 for this release.  I am in the process of updating all my projects to v1.5.0 27-11-2015, and am seeing many compile issues.  Once I have finished the integrations I'll update this project accordingly.
 
 ## Integrating with your project
 - Connect up your ENC28J60 to your ESP8266 as shown
