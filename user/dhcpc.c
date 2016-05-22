@@ -30,15 +30,11 @@ License:
 
   http://www.gnu.de/gpl-ger.html
 -----------------------------------------------------------------------------------------*/
-#include <esp8266.h>
-#include "espmissingincludes.h"
+#include "esp8266.h"
 #include "globals.h"
-#include "ethconfig.h"
-#include "eeprom_sim.h"
+#include "config.h"
 #include "stack.h"
-#include "debug.h"
 #include "timer.h"
-#include "dnsc.h"
 #include "dhcpc.h"
 	
 #ifdef USE_DHCP
@@ -104,9 +100,11 @@ static ETSTimer dhcpCallTimer;
 //----------------------------------------------------------------------------
 //Init of DHCP client port
 void ICACHE_FLASH_ATTR dhcp_init (void)
-{	
+{
+  u8 v;
+	
   // Add function for DHCP packets
-	add_udp_app (DHCP_CLIENT_PORT, (void(*)(u8))dhcp_get);
+	add_udp_app (DHCP_CLIENT_PORT, (void(*)(u8,u8))dhcp_get);
 	dhcp_state = DHCP_STATE_IDLE;
   timeout_cnt = 0;
   
@@ -123,15 +121,17 @@ void ICACHE_FLASH_ATTR check_dhcp (void *arg) {
   
   retVal = dhcp();
   if (retVal == DHCP_SUCCESS) {
-    save_ip_addresses();
-    user_main_setupContinued ();
+    stack_updateIPs();
+    stack_startEthTask();
+    //user_main_setupContinued ();
   } else if (retVal == DHCP_CONTINUE) {
     os_timer_setfn(&dhcpCallTimer, check_dhcp, NULL);
     os_timer_arm(&dhcpCallTimer, 2, 0);
   } else {
-      DHCP_DEBUG("DHCP fail\r\n");
-      read_ip_addresses();
-      user_main_setupContinued ();
+      DHCP_DEBUG("DHCP fail, not updating IP's, continuing with default\r\n");
+      // keep regular IP's 
+      stack_startEthTask();
+      //user_main_setupContinued ();
   } 
 }
 // Configure this client by DHCP
@@ -182,19 +182,37 @@ u8 ICACHE_FLASH_ATTR dhcp (void)
         DHCP_DEBUG("LEASE %2x%2x%2x%2x\r\n", cache.lease[0],cache.lease[1],cache.lease[2],cache.lease[3]);
 		
         dhcp_lease = (u32)cache.lease[0] << 24 | (u32)cache.lease[1] << 16 | (u32)cache.lease[2] <<  8 |(u32)cache.lease[3];
-
-        (*((u32*)&netmask[0]))       = (*((u32*)&cache.netmask[0]));
-        (*((u32*)&router_ip[0]))     = (*((u32*)&cache.router_ip[0]));
-        //Calculate broadcast address
-        (*((u32*)&broadcast_ip[0])) = (((*((u32*)&myip[0])) & (*((u32*)&netmask[0]))) | (~(*((u32*)&netmask[0]))));
-				#ifdef USE_DNS
-				(*((u32*)&dns_server_ip[0])) = (*((u32*)&cache.dns1_ip[0]));
-				#endif
+        
+        #ifdef IPS_IN_UNION
+          sysCfg.netmask.theint               = (*((u32*)&cache.netmask[0]));
+          sysCfg.router_ip.theint             = (*((u32*)&cache.router_ip[0]));
+          #ifdef USE_DNS
+            sysCfg.dns_server_ip.theint       = (*((u32*)&cache.dns1_ip[0]));
+          #endif
+        #else
+          (*((u32*)&sysCfg.netmask[0]))       = (*((u32*)&cache.netmask[0]));
+          (*((u32*)&sysCfg.router_ip[0]))     = (*((u32*)&cache.router_ip[0]));
+          #ifdef USE_DNS
+          (*((u32*)&sysCfg.dns_server_ip[0])) = (*((u32*)&cache.dns1_ip[0]));
+          #endif
+        #endif
         dhcp_state = DHCP_STATE_FINISHED;
-        DHCP_DEBUG("My IP: %d.%d.%d.%d\r\n",myip[0],myip[1],myip[2],myip[3]);
-        DHCP_DEBUG("MASK %d.%d.%d.%d\r\n", netmask[0]  , netmask[1]  , netmask[2]  , netmask[3]);
-        DHCP_DEBUG("Router IP: %d.%d.%d.%d\r\n",router_ip[0],router_ip[1],router_ip[2],router_ip[3]);
-        //DHCP_DEBUG("MASK %d.%d.%d.%d\r\n", netmask[0]  , netmask[1]  , netmask[2]  , netmask[3]);
+        DHCP_DEBUG("FROM DHCP: \r\n");
+        #ifdef IPS_IN_UNION           
+          DHCP_DEBUG("My IP: %d.%d.%d.%d\r\n",sysCfg.ethip.thech[0],sysCfg.ethip.thech[1],sysCfg.ethip.thech[2],sysCfg.ethip.thech[3]);
+          DHCP_DEBUG("MASK %d.%d.%d.%d\r\n", sysCfg.netmask.thech[0]  , sysCfg.netmask.thech[1]  , sysCfg.netmask.thech[2]  , sysCfg.netmask.thech[3]);
+          DHCP_DEBUG("Router IP: %d.%d.%d.%d\r\n",sysCfg.router_ip.thech[0],sysCfg.router_ip.thech[1],sysCfg.router_ip.thech[2],sysCfg.router_ip.thech[3]);
+          #ifdef USE_DNS
+            DHCP_DEBUG("DNS IP: %d.%d.%d.%d\r\n",sysCfg.dns_server_ip.thech[0],sysCfg.dns_server_ip.thech[1],sysCfg.dns_server_ip.thech[2],sysCfg.dns_server_ip.thech[3]);
+          #endif
+        #else
+          DHCP_DEBUG("My IP: %d.%d.%d.%d\r\n",sysCfg.ethip[0], sysCfg.ethip[1], sysCfg.ethip[2], sysCfg.ethip[3]);
+          DHCP_DEBUG("MASK %d.%d.%d.%d\r\n", sysCfg.netmask[0], sysCfg.netmask[1], sysCfg.netmask[2], sysCfg.netmask[3]);
+          DHCP_DEBUG("Router IP: %d.%d.%d.%d\r\n",sysCfg.router_ip[0], sysCfg.router_ip[1], sysCfg.router_ip[2],sysCfg.router_ip[3]);
+          #ifdef USE_DNS
+            DHCP_DEBUG("DNS IP: %d.%d.%d.%d\r\n",sysCfg.dns_server_ip[0], sysCfg.dns_server_ip[1], sysCfg.dns_server_ip[2], sysCfg.dns_server_ip[3]);
+          #endif
+        #endif
         return DHCP_SUCCESS;
       break;
       case DHCP_STATE_NAK_RCVD:
@@ -222,17 +240,32 @@ void ICACHE_FLASH_ATTR dhcp_message (u8 type)
   msg->op          = 1; // BOOTREQUEST
   msg->htype       = 1; // Ethernet
   msg->hlen        = 6; // Ethernet MAC
-  msg->xid[0]      = MYMAC6; //use the MAC as the ID to be unique in the LAN
-  msg->xid[1]      = MYMAC5;
-  msg->xid[2]      = MYMAC4;
-  msg->xid[3]      = MYMAC3;
+  #ifdef USE_SEPARATE_ENC_MAC
+    msg->xid[0]      = MYMAC6; //use the MAC as the ID to be unique in the LAN
+    msg->xid[1]      = MYMAC5;
+    msg->xid[2]      = MYMAC4;
+    msg->xid[3]      = MYMAC3;
+    
+    msg->chaddr[0]   = MYMAC1;
+    msg->chaddr[1]   = MYMAC2;
+    msg->chaddr[2]   = MYMAC3;
+    msg->chaddr[3]   = MYMAC4;
+    msg->chaddr[4]   = MYMAC5;
+    msg->chaddr[5]   = MYMAC6;
+  #else
+    msg->xid[0]      = mymac[5]; 
+    msg->xid[1]      = mymac[4];
+    msg->xid[2]      = mymac[3];
+    msg->xid[3]      = mymac[2];
+    
+    msg->chaddr[0]   = mymac[0];
+    msg->chaddr[1]   = mymac[1];
+    msg->chaddr[2]   = mymac[2];
+    msg->chaddr[3]   = mymac[3];
+    msg->chaddr[4]   = mymac[4];
+    msg->chaddr[5]   = mymac[5];
+	#endif
   msg->flags       = HTONS(0x8000);
-  msg->chaddr[0]   = MYMAC1;
-  msg->chaddr[1]   = MYMAC2;
-  msg->chaddr[2]   = MYMAC3;
-  msg->chaddr[3]   = MYMAC4;
-  msg->chaddr[4]   = MYMAC5;
-  msg->chaddr[5]   = MYMAC6;
   
   options = &msg->options[0];  //options
   *options++       = 99;       //magic cookie
@@ -252,10 +285,17 @@ void ICACHE_FLASH_ATTR dhcp_message (u8 type)
 
   *options++       = 50;    // Option 54: requested IP
   *options++       = 4;     // len = 4
-  *options++       = myip[0];
-  *options++       = myip[1];
-  *options++       = myip[2];
-  *options++       = myip[3];
+  #ifdef IPS_IN_UNION
+    *options++       = sysCfg.ethip.thech[0];
+    *options++       = sysCfg.ethip.thech[1];
+    *options++       = sysCfg.ethip.thech[2];
+    *options++       = sysCfg.ethip.thech[3];
+  #else
+    *options++       = sysCfg.ethip[0];
+    *options++       = sysCfg.ethip[1];
+    *options++       = sysCfg.ethip[2];
+    *options++       = sysCfg.ethip[3];
+  #endif
 
   switch (type)
   {
@@ -440,7 +480,7 @@ void ICACHE_FLASH_ATTR dhcp_parse_options (u8 *msg, struct dhcp_cache *c, u16 si
 // DHCP packets: 20 Bytes IP Header, 8 Bytes UDP_Header,
 // DHCP fixed fields 236 Bytes, min 312 Bytes options -> 576 Bytes min.
 
-void ICACHE_FLASH_ATTR dhcp_get (void)
+void ICACHE_FLASH_ATTR dhcp_get (u8 index, u8 port_index)
 {
   struct dhcp_msg  *msg;
   IP_Header *ip;
@@ -464,16 +504,27 @@ void ICACHE_FLASH_ATTR dhcp_get (void)
 
   // set pointer of DHCP message to beginning of UDP data
   msg = (struct dhcp_msg *)&eth_buffer[UDP_DATA_START];
-
-  //check the id
-  if ( (msg->xid[0] != MYMAC6) ||
-       (msg->xid[1] != MYMAC5) ||
-       (msg->xid[2] != MYMAC4) ||
-       (msg->xid[3] != MYMAC3)    )
-  {
-    DHCP_DEBUG("Wrong DHCP ID, discarded\r\n");
-    return;
-  }
+  #ifdef USE_SEPARATE_ENC_MAC
+    //check the id
+    if ( (msg->xid[0] != MYMAC6) ||
+         (msg->xid[1] != MYMAC5) ||
+         (msg->xid[2] != MYMAC4) ||
+         (msg->xid[3] != MYMAC3)    )
+    {
+      DHCP_DEBUG("Wrong DHCP ID, discarded\r\n");
+      return;
+    }
+  #else
+    //check the id
+    if ( (msg->xid[0] != mymac[5]) ||
+         (msg->xid[1] != mymac[4]) ||
+         (msg->xid[2] != mymac[3]) ||
+         (msg->xid[3] != mymac[2])    )
+    {
+      DHCP_DEBUG("Wrong DHCP ID, discarded\r\n");
+      return;
+    }
+	#endif
 
 
   dhcp_parse_options(&msg->options[0], &cache, (htons(ip->IP_Pktlen)-264) );
@@ -501,9 +552,12 @@ void ICACHE_FLASH_ATTR dhcp_get (void)
   {
     case DHCPOFFER:
       // this will be our IP address
-      (*((u32*)&myip[0])) = (*((u32*)&msg->yiaddr[0]));
-	  //Broadcast-Adresse berechnen
-      (*((u32*)&broadcast_ip[0])) = (((*((u32*)&myip[0])) & (*((u32*)&netmask[0]))) | (~(*((u32*)&netmask[0]))));
+      #ifdef IPS_IN_UNION    
+        memcpy(sysCfg.ethip.thech, msg->yiaddr ,4);
+      #else
+        (*((u32*)&sysCfg.ethip[0])) = (*((u32*)&msg->yiaddr[0]));
+      #endif
+      
       DHCP_DEBUG("** DHCP OFFER RECVD! **\r\n");
       
       dhcp_state = DHCP_STATE_OFFER_RCVD;

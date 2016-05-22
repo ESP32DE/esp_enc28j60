@@ -1,16 +1,4 @@
 /*
------------------------------------------------------------------------------------------
-Author:         Mark F (Cicero-MF) mark@cdelec.co.za    
-Known Issues:   none
-Version:        04.04.2016
-Description:    user_main() - setup snippets
-
-  The ENC28J60 functions are modified for use with the ESP8266, based off an original AVR 
-  version by:
-   Author:         Radig Ulrich mailto: mail@ulrichradig.de
-   Version:        24.10.2007
-  
-  The HTTPD functionality was expanded to use the ENC28J60 with te ESP, but originally from 
  * ----------------------------------------------------------------------------
  * "THE BEER-WARE LICENSE" (Revision 42):
  * Jeroen Domburg <jeroen@spritesmods.com> wrote this file. As long as you retain 
@@ -19,127 +7,180 @@ Description:    user_main() - setup snippets
  * ----------------------------------------------------------------------------
  */
 
------------------------------------------------------------------------------------------*/
+/*
+This is example code for the esphttpd library. It's a small-ish demo showing off 
+the server, including WiFi connection management capabilities, some IO and
+some pictures of cats.
+*/
 #include <esp8266.h>
-#include "espmissingincludes.h"
-#include "globals.h"
+#include "httpd.h"
+#include "io.h"
+#include "httpdespfs.h"
+#include "cgi.h"
+#include "cgiwifi.h"
+#include "cgiflash.h"
+#include "stdout.h"
 #include "auth.h"
 #include "espfs.h"
-#include "ets_sys.h"
-#include "driver/uart.h"
-#include "osapi.h"
-#include "debug.h"
-#include "timer.h"
-#include "eeprom_sim.h"
-#include "dhcpc.h"
+#include "captdns.h"
+#include "webpages-espfs.h"
+#include "cgiwebsocket.h"
+#include "stack.h"
 
-static ETSTimer ethLoopTimer;
-extern u32 my1secTime;
+//The example can print out the heap use every 3 seconds. You can use this to catch memory leaks.
+#define SHOW_HEAP_USE
 
-
-#ifdef ENC28J60
-static void ICACHE_FLASH_ATTR ethLoopCb (void *arg) {
- 
-	static u32 time_old = ENC_RESET_TIMEOUT;
-	
-  os_timer_disarm(&ethLoopTimer);
-	os_timer_setfn(&ethLoopTimer, ethLoopCb, NULL);
-  
-	eth_get_data();
-
-	//Ethernet OK?
-	if(my1secTime > time_old)
-	{
-		if(eth.no_reset)
-		{
-			eth.no_reset = 0;
-		}
-		else
-		{
-      INFO("RST ");
-			ETS_GPIO_INTR_DISABLE();
-			enc_init();
-			enc28j60_led_blink (0);
-			ETS_GPIO_INTR_ENABLE();
-		}
-		time_old = my1secTime+ENC_RESET_TIMEOUT;
+//Function that tells the authentication system what users/passwords live on the system.
+//This is disabled in the default build; if you want to try it, enable the authBasic line in
+//the builtInUrls below.
+int myPassFn(HttpdConnData *connData, int no, char *user, int userLen, char *pass, int passLen) {
+	if (no==0) {
+		os_strcpy(user, "admin");
+		os_strcpy(pass, "s3cr3t");
+		return 1;
+//Add more users this way. Check against incrementing no for each user added.
+//	} else if (no==1) {
+//		os_strcpy(user, "user1");
+//		os_strcpy(pass, "something");
+//		return 1;
 	}
-  
-  os_timer_arm(&ethLoopTimer, 2, 0);	
-}  
+	return 0;
+}
+
+static ETSTimer websockTimer;
+
+//Broadcast the uptime in seconds every second over connected websockets
+static void ICACHE_FLASH_ATTR websockTimerCb(void *arg) {
+	static int ctr=0;
+	char buff[128];
+	ctr++;
+	os_sprintf(buff, "Up for %d minutes %d seconds!\n", ctr/60, ctr%60);
+	cgiWebsockBroadcast("/websocket/ws.cgi", buff, os_strlen(buff), WEBSOCK_FLAG_NONE);
+}
+
+//On reception of a message, send "You sent: " plus whatever the other side sent
+void myWebsocketRecv(Websock *ws, char *data, int len, int flags) {
+	int i;
+	char buff[128];
+	os_sprintf(buff, "You sent: ");
+	for (i=0; i<len; i++) buff[i+10]=data[i];
+	buff[i+10]=0;
+	cgiWebsocketSend(ws, buff, os_strlen(buff), WEBSOCK_FLAG_NONE);
+}
+
+//Websocket connected. Install reception handler and send welcome message.
+void myWebsocketConnect(Websock *ws) {
+	ws->recvCb=myWebsocketRecv;
+	cgiWebsocketSend(ws, "Hi, Websocket!", 14, WEBSOCK_FLAG_NONE);
+}
+
+
+#ifdef ESPFS_POS
+CgiUploadFlashDef uploadParams={
+	.type=CGIFLASH_TYPE_ESPFS,
+	.fw1Pos=ESPFS_POS,
+	.fw2Pos=0,
+	.fwSize=ESPFS_SIZE,
+};
+#define INCLUDE_FLASH_FNS
+#endif
+#ifdef OTA_FLASH_SIZE_K
+CgiUploadFlashDef uploadParams={
+	.type=CGIFLASH_TYPE_FW,
+	.fw1Pos=0x1000,
+	.fw2Pos=((OTA_FLASH_SIZE_K*1024)/2)+0x1000,
+	.fwSize=((OTA_FLASH_SIZE_K*1024)/2)-0x1000,
+};
+#define INCLUDE_FLASH_FNS
+#endif
+
+/*
+This is the main url->function dispatching data struct.
+In short, it's a struct with various URLs plus their handlers. The handlers can
+be 'standard' CGI functions you wrote, or 'special' CGIs requiring an argument.
+They can also be auth-functions. An asterisk will match any url starting with
+everything before the asterisks; "*" matches everything. The list will be
+handled top-down, so make sure to put more specific rules above the more
+general ones. Authorization things (like authBasic) act as a 'barrier' and
+should be placed above the URLs they protect.
+*/
+HttpdBuiltInUrl builtInUrls[]={
+	{"*", cgiRedirectApClientToHostname, "esp8266.nonet"},
+	{"/", cgiRedirect, "/index.tpl"},
+	{"/flash.bin", cgiReadFlash, NULL},
+	{"/led.tpl", cgiEspFsTemplate, tplLed},
+	{"/index.tpl", cgiEspFsTemplate, tplCounter},
+	{"/led.cgi", cgiLed, NULL},
+	{"/flash/download", cgiReadFlash, NULL},
+#ifdef INCLUDE_FLASH_FNS
+	{"/flash/next", cgiGetFirmwareNext, &uploadParams},
+	{"/flash/upload", cgiUploadFirmware, &uploadParams},
+#endif
+	{"/flash/reboot", cgiRebootFirmware, NULL},
+
+	//Routines to make the /wifi URL and everything beneath it work.
+
+//Enable the line below to protect the WiFi configuration with an username/password combo.
+//	{"/wifi/*", authBasic, myPassFn},
+
+	{"/wifi", cgiRedirect, "/wifi/wifi.tpl"},
+	{"/wifi/", cgiRedirect, "/wifi/wifi.tpl"},
+	{"/wifi/wifiscan.cgi", cgiWiFiScan, NULL},
+	{"/wifi/wifi.tpl", cgiEspFsTemplate, tplWlan},
+	{"/wifi/connect.cgi", cgiWiFiConnect, NULL},
+	{"/wifi/connstatus.cgi", cgiWiFiConnStatus, NULL},
+	{"/wifi/setmode.cgi", cgiWiFiSetMode, NULL},
+
+	{"/websocket/ws.cgi", cgiWebsocket, myWebsocketConnect},
+
+	{"*", cgiEspFsHook, NULL}, //Catch-all cgi function for the filesystem
+	{NULL, NULL, NULL}
+};
+
+
+#ifdef SHOW_HEAP_USE
+static ETSTimer prHeapTimer;
+
+static void ICACHE_FLASH_ATTR prHeapTimerCb(void *arg) {
+	os_printf("Heap: %ld\n", (unsigned long)system_get_free_heap_size());
+}
 #endif
 
 
-/* Sets up the GPIO, and the interrupt function call from the ENC */
-void ICACHE_FLASH_ATTR ioInit() {
-  uint32 gpio_status;   
-  
-  #ifdef ENC28J60
-  PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO5_U, FUNC_GPIO5);    // enc reset
-  PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO4_U, FUNC_GPIO4);    // enc interrupt 
-  
-  GPIO_DIS_OUTPUT(ENCINTGPIO);
-  PIN_PULLUP_EN(PERIPHS_IO_MUX_GPIO5_U);
-  ETS_GPIO_INTR_DISABLE();
-  ETS_GPIO_INTR_ATTACH(stack_encInterrupt,ENCINTGPIO);
-  
-  GPIO_REG_WRITE(GPIO_STATUS_W1TS_ADDRESS, BIT(ENCINTGPIO));
-  gpio_pin_intr_state_set(GPIO_ID_PIN(ENCINTGPIO),GPIO_PIN_INTR_NEGEDGE);
-  gpio_status = GPIO_REG_READ(GPIO_STATUS_ADDRESS);
-  GPIO_REG_WRITE(GPIO_STATUS_W1TC_ADDRESS, gpio_status);
-  ETS_GPIO_INTR_ENABLE();
-  #endif
-  INFO("end io init\r\n");
-}
 
-void ICACHE_FLASH_ATTR user_main_setupContinued (void) {  
-  // 0x40200000 is the base address for spi flash memory mapping, ESPFS_POS is the position
-  // where image is written in flash that is defined in Makefile.
-  espFsInit((void*)(0x40200000 + ESPFS_POS));
+//Main routine. Initialize stdout, the I/O, filesystem and the webserver and we're done.
+void user_init(void) {
+  wifi_station_set_auto_connect(FALSE); 
+	stdoutInit();
+  CFG_Load();
+	ioInit();	     
   
+  MAIN_DEBUG("\nInitialise ENC stack, dhcp if requested\n");	
+  stack_init();  
+
+  /* This DNS is only for the wifi interface, as wired never acts as an 'AP' */
+  captdnsInit(); 
+
+	// 0x40200000 is the base address for spi flash memory mapping, ESPFS_POS is the position
+	// where image is written in flash that is defined in Makefile.
+  #ifdef ESPFS_POS
+    espFsInit((void*)(0x40200000 + ESPFS_POS));
+  #else
+    espFsInit((void*)(webpages_espfs_start));
+  #endif
   httpdInit(builtInUrls, 80);
- 
   #ifdef SHOW_HEAP_USE
     os_timer_disarm(&prHeapTimer);
     os_timer_setfn(&prHeapTimer, prHeapTimerCb, NULL);
     os_timer_arm(&prHeapTimer, 3000, 1);
   #endif
+  os_timer_disarm(&websockTimer);
+  os_timer_setfn(&websockTimer, websockTimerCb, NULL);
+  os_timer_arm(&websockTimer, 1000, 1);
   
-  #ifdef ENC28J60
-    // this is like a while loop - but this is the closest we can get to that on the esp
-    os_timer_disarm(&ethLoopTimer);
-    os_timer_setfn(&ethLoopTimer, ethLoopCb, NULL);
-    os_timer_arm(&ethLoopTimer, 2, 0);
-    enc28j60_led_blink (1);
-  #endif
- 
-  os_printf("\nReady\n");
+  os_printf("\nReady\n");	
 }
 
-// Main routine. Initialize stdout, the I/O, filesystem and the webserver and we're done.
-void user_init(void) { 
-	uart_init(BIT_RATE_115200, BIT_RATE_115200);	
-   
-  #ifdef ENC28J60
-    /* For testing switch off wifi, just focussing on ENC */
-    wifi_station_set_auto_connect(FALSE);
-    
-    //Application inits
-    INFO("\nEEPROM SIM INIT\n");
-    eeprom_sim_init();
-    
-    INFO("\nSTACK INIT\n");	
-    stack_init();
-    
-    INFO("\nIO INIT\n");
-    ioInit();
-    
-    #ifdef USE_DHCP
-      /* DHCP will negotiate, and once done call user_main_setupContinued() */
-      INFO("\nDHCP INIT\n");
-      dhcp_init();      
-    #else
-      INFO("\nSETUP CONT.\n");
-      user_main_setupContinued();
-    #endif 	
+void user_rf_pre_init() {
+	//Not needed, but some SDK versions want this defined.
 }

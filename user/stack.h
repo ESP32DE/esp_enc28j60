@@ -1,7 +1,7 @@
 /*-----------------------------------------------------------------------------------------
 Author:         Mark F (Cicero-MF) mark@cdelec.co.za    
 Known Issues:   none
-Version:        04.04.2016
+Version:        18.05.2016
 Description:    Header for stack.c
 
   This code was modified for use with the ESP8266, based off an original AVR version by  
@@ -33,19 +33,12 @@ License:
 	#define _STACK_H
 
 #include <string.h>
-#include "globals.h"
 #include "enc28j60.h"
-#include "ethconfig.h"
+#include "user_config.h"
 #include "timer.h"
-
-//#define DEBUG(...) 			
-#define DEBUG INFO   		
+#include "httpd.h"
 
 #define MAX_APP_ENTRY 5
-
-#define IP_EEPROM_STORE 30
-#define NETMASK_EEPROM_STORE 34
-#define ROUTER_IP_EEPROM_STORE 38
 
 typedef struct __attribute__((packed))
 {
@@ -58,14 +51,15 @@ extern ethStruct eth;
 
 typedef struct __attribute__((packed))
 {
-	u16 port;		      // Port
-	void(*fp)(u8);  	// Pointer to function to be executed
+	u16 port;		      // Local Port!
+	void(*fp)(u8, u8);  	// Pointer to function to be executed
+  struct espconn *espconn;
 } TCP_PORT_ITEM;
 
 typedef struct __attribute__((packed))
 {
 	u16 port;		      // Port
-	void(*fp)(u8);  	// Pointer to function to be executed
+	void(*fp)(u8, u8);  	// Pointer to function to be executed
 } UDP_PORT_ITEM;
 
 extern TCP_PORT_ITEM TCP_PORT_TABLE[MAX_APP_ENTRY];
@@ -81,7 +75,7 @@ extern u8 broadcast_ip[4];
 
 extern u16 IP_id_counter;
 
-#define MAX_TCP_ENTRY 5
+#define MAX_TCP_ENTRY 8
 #define MAX_UDP_ENTRY 3
 #define MAX_ARP_ENTRY 6
 //#define MTU_SIZE 700
@@ -109,19 +103,25 @@ typedef struct __attribute__((packed))
 	volatile u16 arp_t_time;
 } arp_table;
 
-typedef struct __attribute__((packed))
+//FYI - Cant have attribute packed for this
+typedef struct
 {
-	volatile u32 ip				;
-	volatile u16  src_port		;
-	volatile u16  dest_port		;
-	volatile u32 ack_counter	;
-	volatile u32 seq_counter	;
-	volatile u8 status			;
-	volatile u16  app_status		;
-	volatile u8 time			;
-	volatile u8 error_count	;
-	volatile u8 first_ack	:1	;
-	volatile u8 i;
+	volatile u32 ip;
+	volatile u16  src_port;
+	volatile u16  dest_port;
+	volatile u32 ack_counter;
+	volatile u32 seq_counter;
+	volatile u8 status;
+	volatile u16  app_status;
+	volatile u8 time;
+	volatile u8 error_count;
+	volatile u8 first_ack	:1;
+  
+  /* To copy the way the SDK does things with espconn,
+    we need separate ones per port/entry 
+    TODO: Would be better to malloc these... */
+  esp_tcp tcp_data;
+  struct espconn encconn;
 } tcp_table;
 
 typedef struct __attribute__((packed))
@@ -133,15 +133,16 @@ typedef struct __attribute__((packed))
 
 extern PING_STRUCT ping;
 //----------------------------------------------------------------------------
-//Prototypen
+//Prototypes
 void stack_encInterrupt (void);
+void stack_updateIPs (void);
+sint8 stack_register_tcp_accept(struct espconn *espconn, u8 stack_func);
 
 u16  htons(u16 val);
 u32 htons32(u32 val);
-void stack_init (void);
+u32 stack_init (void);
 void check_packet (void);
 void eth_get_data (void);
-u32 get_eeprom_value (u16 eeprom_adresse,u32 default_value);
 
 void new_eth_header (u8 *,u32);
 
@@ -168,14 +169,12 @@ void create_new_udp_packet(	u16,u16,u16,u32);
 void find_and_start (u8 index);
 void tcp_timer_call (void);
 void arp_timer_call (void);
-s8 add_tcp_app (u16, void(*fp1)(u8));
+s8 add_tcp_app (u16, void(*fp1)(u8, u8), struct espconn *espconn);
 void kill_tcp_app (u16 port);
-void add_udp_app (u16, void(*fp1)(u8));
+void add_udp_app (u16, void(*fp1)(u8, u8));
 void kill_udp_app (u16 port);
 void change_port_tcp_app (u16, u16);
 void pinging (void);
-
-#define ESP_CONN_WIRED    0x40
 
 #define ETHER_OFFSET			0x00
 #define ETHER_MACDEST			(ETHER_OFFSET)
@@ -311,8 +310,8 @@ typedef struct __attribute__((packed)) {
 									//meistens also 4 + 4Bit Headergröße 	
 	u8	IP_Tos;			//Type of Service
 	u16	IP_Pktlen;		//16 Bit Komplette Läng des IP Datagrams in Bytes
-	u16	IP_Id;			//ID des Packet für Fragmentierung oder 
-									//Reassemblierung
+	u16	IP_Id;			//ID of the package for fragmentation 
+									//reassembling
 	u16	IP_Frag_Offset;	//wird benutzt um ein fragmentiertes 
 									//IP Packet wieder korrekt zusammenzusetzen
 	u8	IP_ttl;			//8 Bit Time to Live die lebenszeit eines Paket
@@ -339,6 +338,7 @@ typedef struct __attribute__((packed)) {
 		u16     	ICMP_Id;		//2 byte Identifizierung
 		u16     	ICMP_SeqNum;	//Sequenznummer
 } ICMP_Header;
+
 
 //----------------------------------------------------------------------------
 //TCP Header Layout
@@ -368,8 +368,10 @@ typedef struct __attribute__((packed)) {
 } UDP_Header;
 
 /* HTTDP specific functions */
-void ICACHE_FLASH_ATTR serveSimpleWeb (u8 index);
-void ICACHE_FLASH_ATTR stack_saveHtmlPacket(uint8_t *dataIn, u16 data_length);
+void ICACHE_FLASH_ATTR serveHTTPD (u8 index, u8 port_index);
+sint8 ICACHE_FLASH_ATTR stack_sendData(struct espconn *conn, uint8_t *dataIn, u16 data_length);
+void ICACHE_FLASH_ATTR stack_startEthTask (void);
+sint8 ICACHE_FLASH_ATTR stack_connDisconnect(struct espconn *conn);
 
 
 #endif // #define _STACK_H

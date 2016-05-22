@@ -2,7 +2,7 @@
 -----------------------------------------------------------------------------------------
 Author:         Mark F (Cicero-MF) mark@cdelec.co.za
 Remarks:        
-Version:        04.04.2016
+Version:        15.05.2016
 Description:    Ethernet device driver for the enc28j60 and an esp8266
 
   This code was modified for use with the ESP8266, based off a version by Harald Freudenberger 
@@ -30,10 +30,13 @@ License:
   http://www.gnu.de/gpl-ger.html
 -----------------------------------------------------------------------------------------*/
 
-#include <esp8266.h>
+#include "esp8266.h"
 #include "globals.h"
-#include "driver/spi.h"
+#include "spi.h"
 #include "enc28j60.h"
+#include "gpio.h"
+#include "io.h"
+
 //-----------------------------------------------------------------------------
 
 u8 mymac[6];
@@ -41,8 +44,8 @@ u8 enc_revid = 0;
 
 //-----------------------------------------------------------------------------
 
-static volatile u8 enc_cur_bank = 0;
-static volatile u16  enc_next_packet_ptr = 0;
+static volatile u8 enc_cur_bank           = 0;
+static volatile u16  enc_next_packet_ptr  = 0;
 
 static const u8 enc_configdata[] = {
 
@@ -98,6 +101,9 @@ static const u8 enc_configdata[] = {
 	// non back-to-back inter packet gap delay time high (should be 0x0C for half duplex)
 	ENC_REG_MAIPGH, 0x0C,
 	#endif
+  
+  // disable CLKOUT pin
+	ENC_REG_ECOCON, 0x00,
 
 	// our mac address
 	ENC_REG_MAADR5, MYMAC1,
@@ -107,12 +113,8 @@ static const u8 enc_configdata[] = {
 	ENC_REG_MAADR1, MYMAC5,
 	ENC_REG_MAADR0, MYMAC6,
 
-	// disable CLKOUT pin
-	ENC_REG_ECOCON, 0x00,
-
-	// end of enc registers marker
-	0xFF, 0xFF,
-
+  0xFF, 0xFF,
+  
 	// now the phy registers (with 2 bytes data each)
 
 	#ifdef FULL_DUPLEX
@@ -137,6 +139,18 @@ static const u8 enc_configdata[] = {
 	// end of config data marker
 	0xFF, 0xFF
 };
+
+u16 ICACHE_FLASH_ATTR enc_linkup (void) {
+  u16 u;
+  u = enc_read_phyreg(ENC_REG_PHSTAT2);  //ENC_DEBUG("PHSTAT2 %4x\n", u);  
+  if (u & ETHERNET_LINK_UP) {
+    return ETHERNET_LINK_UP;
+  } else {
+    return 0;
+  }
+}
+
+
 
 //-----------------------------------------------------------------------------
 
@@ -239,7 +253,7 @@ static void ICACHE_FLASH_ATTR enc_write_reg( u8 reg, u8 value )
 }
 
 #if 1
-static u16 ICACHE_FLASH_ATTR enc_read_phyreg( u8 phyreg )
+u16 ICACHE_FLASH_ATTR enc_read_phyreg( u8 phyreg )
 {
 	u16 value;
 
@@ -259,7 +273,6 @@ static u16 ICACHE_FLASH_ATTR enc_read_phyreg( u8 phyreg )
 static void ICACHE_FLASH_ATTR enc_write_phyreg( u8 phyreg, u16 value )
 {
   u8 rec;
-  u8 v;
 	enc_write_reg( ENC_REG_MIREGADR, phyreg );
 	enc_write_reg( ENC_REG_MIWRL, LO8(value) );
 	enc_write_reg( ENC_REG_MIWRH, HI8(value) );
@@ -298,7 +311,6 @@ static void ICACHE_FLASH_ATTR enc_write_buf( u8 *buf, u16 len )
 
 void ICACHE_FLASH_ATTR enc_send_packet( u16 len, u8 *buf )
 {
-	u8 ctrl = 0;
 	u16 ms = 100;
 
 	//ENC_DEBUG("enc_send: %u bytes\n", len);
@@ -407,7 +419,7 @@ u16 ICACHE_FLASH_ATTR enc_receive_packet( u16 bufsize, u8 *buf )
 
 //-----------------------------------------------------------------------------
 
-#if 1
+#if 0
 static void ICACHE_FLASH_ATTR enc_regdump(void)
 {
 	u8 v;
@@ -533,18 +545,15 @@ static void ICACHE_FLASH_ATTR enc_regdump(void)
 
 void ICACHE_FLASH_ATTR enc_init(void)
 {
-	int i=0;
+	int i=0, j=0;
 	u16 u;
-	u8 r, d, v;
+	u8 r, d;
 	
-  //ENC_DEBUG("enc reset pin low and high...");
   //ENC Hardware Reset
   
   gpio_output_set(0, (1<<ENCRESETGPIO), (1<<ENCRESETGPIO), 0);  
   os_delay_us(200000);
-  //ENC_DEBUG("low...");
   gpio_output_set((1<<ENCRESETGPIO), 0, (1<<ENCRESETGPIO), 0);  
-  //ENC_DEBUG("high\r\n");
 	os_delay_us(200000);
   
 	// config enc chip select as output and deselect enc
@@ -552,7 +561,6 @@ void ICACHE_FLASH_ATTR enc_init(void)
   
 	// init spi
 	spi_init(SPI_USED);
-  //ENC_DEBUG("spi_init\r\n");
 
 	// send a reset command via spi to the enc
 	enc_reset();
@@ -563,29 +571,44 @@ void ICACHE_FLASH_ATTR enc_init(void)
 	// get enc revision id
 	//enc_revid = enc_read_reg( ENC_REG_EREVID );
 	//ENC_DEBUG("enc revid %x\n", (int) enc_revid);
-
-	// setup mymac variable
-	mymac[0] = MYMAC1;
-	mymac[1] = MYMAC2;
-	mymac[2] = MYMAC3;
-	mymac[3] = MYMAC4;
-	mymac[4] = MYMAC5;
-	mymac[5] = MYMAC6;
+  
+  //MAC Address
+  #ifdef USE_SEPARATE_ENC_MAC
+    //MAC Adresse setzen
+    mymac[0] = MYMAC1;
+    mymac[1] = MYMAC2;
+    mymac[2] = MYMAC3;
+    mymac[3] = MYMAC4;
+    mymac[4] = MYMAC5;
+    mymac[5] = MYMAC6;
+  #else
+    wifi_get_macaddr(STATION_IF, mymac);
+    ENC_DEBUG("\""MACSTR"\"\r\n", MAC2STR(mymac));
+	#endif
 
 	// setup enc registers according to the enc_configdata struct
-	while(1) {
-		r = enc_configdata[i++];
+	while(i < sizeof(enc_configdata)) {
+		r = enc_configdata[i++];    
 		d = enc_configdata[i++];
-		if( r == 0xFF && d == 0xFF ) break;
+		if(r == ENC_REG_MAADR5) break;
 		enc_write_reg( r, d );
 	}
+  
+  // load mac 
+  i-=2;  // to keep with the loading method, ease of understanding
+  for (j=0;j<6;j++) {
+    r = enc_configdata[i]; 
+    d = mymac[j];
+    i+=2;
+    enc_write_reg( r, d );   
+  }
   
   //ENC_DEBUG("finished enc registers, cu bank = %u\r\n", enc_cur_bank);
   
   //enc_regdump(); 
   
 	// now the phy registers
-	while(1) {
+	while(i < sizeof(enc_configdata)) {
 		r = enc_configdata[i++];
 		d = enc_configdata[i++];
 		if( r == 0xFF && d == 0xFF ) break;
@@ -594,8 +617,6 @@ void ICACHE_FLASH_ATTR enc_init(void)
 		u |= d;
 		enc_write_phyreg( r, u );
 	}
-
-  //ENC_DEBUG("finished phy registers\r\n");
   
 	// setup receive next packet pointer
 	enc_next_packet_ptr = ENC_RX_BUFFER_START;
@@ -608,10 +629,6 @@ void ICACHE_FLASH_ATTR enc_init(void)
 
 	// enable receive
 	enc_setbits_reg( ENC_REG_ECON1, (1<<ENC_BIT_RXEN) );
-
-  //ENC_DEBUG("finished enc_init\r\n");
-  
-  //v = enc_read_reg(ENC_REG_ERXFCON);     INFO("ERXFCON %2x\n", (unsigned) v);
 }
 
 //-----------------------------------------------------------------------------
