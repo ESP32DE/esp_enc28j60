@@ -1301,12 +1301,14 @@ sint8 ICACHE_FLASH_ATTR stack_connDisconnect(struct espconn *conn) {
   if (index >= MAX_TCP_ENTRY) {
     STACK_DEBUG("HOUSTON WE HAVE A PROBLEM - no index found for sendData\r\n!");
     // TODO: Catch this properly
+    conn = NULL;
     return 0;
   }
   
   tcp_entry[index].status = ACK_FLAG | FIN_FLAG;          
   create_new_tcp_packet(0,index);
   tcp_index_del(index);
+  conn = NULL;
   return 1;
 }
 
