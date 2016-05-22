@@ -2,7 +2,7 @@
 -----------------------------------------------------------------------------------------
 Author:         Mark F (Cicero-MF) mark@cdelec.co.za    
 Known Issues:   none
-Version:        18.05.2016
+Version:        22.05.2016
 Description:    Simple Ethernet stack for the enc28j60 and an esp8266
 
   This code was modified for use with the ESP8266, based off an original AVR version by  
@@ -1266,7 +1266,9 @@ void ICACHE_FLASH_ATTR serveHTTPD (u8 index, u8 port_index) {
   u16 dat_p;
 
   if(tcp_entry[index].status & FIN_FLAG) {
-    // FIXME: Mark for destruction?
+    // FIXME: Mark for destruction...
+    tcp_entry[index].encconn.state = ESPCONN_CLOSE;
+    tcp_entry[index].encconn.proto.tcp->disconnect_callback(&tcp_entry[index].encconn);
     return;
   }  
   
@@ -1304,11 +1306,11 @@ sint8 ICACHE_FLASH_ATTR stack_connDisconnect(struct espconn *conn) {
     conn = NULL;
     return 0;
   }
-  
+  tcp_entry[index].encconn.state = ESPCONN_CLOSE;
+  tcp_entry[index].encconn.proto.tcp->disconnect_callback(&tcp_entry[index].encconn);
   tcp_entry[index].status = ACK_FLAG | FIN_FLAG;          
   create_new_tcp_packet(0,index);
   tcp_index_del(index);
-  conn = NULL;
   return 1;
 }
 
