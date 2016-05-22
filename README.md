@@ -1,18 +1,18 @@
 # esp_enc28j60
 ##Ethernet connectivity to an ESP8266 via an ENC28J60 
 
-This project adds the ENC28J60 to the ESP8266, and allows Sprites HTTPD functionality via the wired connection.
+This project adds the ENC28J60 to the ESP8266, and allows Sprites HTTPD functionality via a wired connection.
+- Allows for concurrent connections to the ESP, both via wired connection and wireless to serve the HTTPD project.
 
 Forum discussion - http://www.esp8266.com/viewtopic.php?f=11&t=9413
 
 ![alt tag](https://github.com/Cicero-MF/esp_enc28j60/blob/master/ethernet%20to%20esp%20wiring.png)
 
-**Disclaimer:** This initial release is a bit rushed, and isn't in the state I would like it to be, so please treat it as a work in progress.  I'd love contributions, questions and community input to make it solid.  Please also bear in mind I am running an older version of the SDK, so you may have some minor compile problems.  I was using the SDK v1.0.1 24-04-2015 for this release.  I am in the process of updating all my projects to v1.5.0 27-11-2015, and am seeing many compile issues.  Once I have finished the integrations I'll update this project accordingly.
+**SDK Version:** v1.5.0 27-11-2015
 
-## Integrating with your project
+## Running and testing esp_enc28j60
 - Connect up your ENC28J60 to your ESP8266 as shown
-- Merge the user_main.c functions and variables into your user_main.c.  
-- Then just include the other files, they shouldn't need any real changes.
+- Project has been copied in full, so compile and run as you would the httpd project normally
 - Lastly, dont hesitate to contact me with any questions you may have.  Good luck!
 
 ##Thanks
