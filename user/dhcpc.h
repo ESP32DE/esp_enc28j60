@@ -35,10 +35,7 @@ License:
 #ifndef _DHCPCLIENT_H
 	#define _DHCPCLIENT_H
   #include <stdio.h>
-  #include "debug.h"
-
-	#define DHCP_DEBUG INFO
-	//#define DHCP_DEBUG(...)
+  #include "globals.h"
 
 	#define DHCP_CLIENT_PORT		  68
 	#define DHCP_SERVER_PORT		  67
@@ -53,7 +50,7 @@ License:
 
   void dhcp_init     (void);
   void dhcp_message  (u8 type);
-  void dhcp_get      (void);
+  void dhcp_get      (u8 index, u8 port_index);
   
   u8 ICACHE_FLASH_ATTR dhcp (void);
   void ICACHE_FLASH_ATTR check_dhcp (void *arg);

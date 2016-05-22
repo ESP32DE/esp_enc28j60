@@ -25,9 +25,9 @@
 * SOFTWARE.
 */
 
-#include <esp8266.h>
-#include "debug.h"
-#include "driver/spi.h"
+#include "esp8266.h"
+#include "globals.h"
+#include "spi.h"
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -41,18 +41,18 @@
 void ICACHE_FLASH_ATTR spi_init(uint8 spi_no){
 	
 	if(spi_no > 1) return; //Only SPI and HSPI are valid spi modules. 
-  //INFO("spi_init begin\r\n");
+  //SPI_DEBUG("spi_init begin\r\n");
 	spi_init_gpio(spi_no, SPI_CLK_USE_DIV);
-  //INFO("spi_init gpio\r\n");
+  //SPI_DEBUG("spi_init gpio\r\n");
 	spi_clock(spi_no, SPI_CLK_PREDIV, SPI_CLK_CNTDIV);
-  //INFO("spi_init clk\r\n");
+  //SPI_DEBUG("spi_init clk\r\n");
 	spi_tx_byte_order(spi_no, SPI_BYTE_ORDER_HIGH_TO_LOW);
-  //INFO("spi_init tx order\r\n");
+  //SPI_DEBUG("spi_init tx order\r\n");
 	spi_rx_byte_order(spi_no, SPI_BYTE_ORDER_HIGH_TO_LOW); 
-  //INFO("spi_init rx order\r\n");
+  //SPI_DEBUG("spi_init rx order\r\n");
 	SET_PERI_REG_MASK(SPI_USER(spi_no), SPI_CS_SETUP|SPI_CS_HOLD);
 	CLEAR_PERI_REG_MASK(SPI_USER(spi_no), SPI_FLASH_MODE);
-  //INFO("spi_init done\r\n");
+  //SPI_DEBUG("spi_init done\r\n");
 
 }
 
@@ -80,12 +80,20 @@ void ICACHE_FLASH_ATTR spi_init_gpio(uint8 spi_no, uint8 sysclk_as_spiclk){
 	} 
 
 	if(spi_no==SPI){
+    SPI_DEBUG("Regular SPI\r\n");
 		WRITE_PERI_REG(PERIPHS_IO_MUX, 0x005|(clock_div_flag<<8)); //Set bit 8 if 80MHz sysclock required
+		SPI_DEBUG("spi clock\r\n");
     PIN_FUNC_SELECT(PERIPHS_IO_MUX_SD_CLK_U, 1);
+    SPI_DEBUG("spi clk u\r\n");
 		PIN_FUNC_SELECT(PERIPHS_IO_MUX_SD_CMD_U, 1);
+    SPI_DEBUG("spi cmd u\r\n");
 		PIN_FUNC_SELECT(PERIPHS_IO_MUX_SD_DATA0_U, 1);	
+    SPI_DEBUG("spi data0 u\r\n");
 		PIN_FUNC_SELECT(PERIPHS_IO_MUX_SD_DATA1_U, 1);
+    
+    SPI_DEBUG("finished pin funcs\r\n");
 	}else if(spi_no==HSPI){
+    SPI_DEBUG("SPI - Using HSPI\r\n");
 		WRITE_PERI_REG(PERIPHS_IO_MUX, 0x105|(clock_div_flag<<9)); //Set bit 9 if 80MHz sysclock required
 		PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTDI_U, 2); //GPIO12 is HSPI MISO pin (Master Data In)
 		PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTCK_U, 2); //GPIO13 is HSPI MOSI pin (Master Data Out)
@@ -244,7 +252,7 @@ uint32 ICACHE_FLASH_ATTR spi_transaction(uint8 spi_no, uint8 cmd_bits, uint16 cm
 		SET_PERI_REG_MASK(SPI_USER(spi_no), SPI_USR_COMMAND); //enable COMMAND function in SPI module
 		uint16 command = cmd_data << (16-cmd_bits); //align command data to high bits
 		command = ((command>>8)&0xff) | ((command<<8)&0xff00); //swap byte order
-		WRITE_PERI_REG(SPI_USER2(spi_no), ((((cmd_bits-1)&SPI_USR_COMMAND_BITLEN)<<SPI_USR_COMMAND_BITLEN_S) | command&SPI_USR_COMMAND_VALUE));	
+		WRITE_PERI_REG(SPI_USER2(spi_no), ((((cmd_bits-1)&SPI_USR_COMMAND_BITLEN)<<SPI_USR_COMMAND_BITLEN_S) | (command&SPI_USR_COMMAND_VALUE)));	
 	}
 //########## END SECTION ##########//
 
@@ -273,7 +281,7 @@ uint32 ICACHE_FLASH_ATTR spi_transaction(uint8 spi_no, uint8 cmd_bits, uint16 cm
         //for example, 0xDA4 12 bits without SPI_WR_BYTE_ORDER would usually be output as if it were 0x0DA4, 
         //of which 0xA4, and then 0x0 would be shifted out (first 8 bits of low byte, then 4 MSB bits of high byte - ie reverse byte order). 
         //The code below shifts it out as 0xA4 followed by 0xD as you might require. 
-        WRITE_PERI_REG(SPI_W0(spi_no), ((0xFFFFFFFF<<(dout_bits - dout_extra_bits)&dout_data)<<(8-dout_extra_bits) | (0xFFFFFFFF>>(32-(dout_bits - dout_extra_bits)))&dout_data));
+        WRITE_PERI_REG(SPI_W0(spi_no), (((0xFFFFFFFF<<(dout_bits - dout_extra_bits)&dout_data)<<(8-dout_extra_bits)) | ((0xFFFFFFFF>>(32-(dout_bits - dout_extra_bits)))&dout_data)));
       } else {
         WRITE_PERI_REG(SPI_W0(spi_no), dout_data);
       }

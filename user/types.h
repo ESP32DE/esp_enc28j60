@@ -5,8 +5,8 @@
 		#define NULL      0
 	#endif
 
-  #define FAIL      1
-  #define PASS      0
+  //#define FAIL      1
+  //#define PASS      0
   
   typedef unsigned char   u_char;
   typedef unsigned char   Uchar;

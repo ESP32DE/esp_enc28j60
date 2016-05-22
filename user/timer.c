@@ -32,11 +32,11 @@ License:
   http://www.gnu.de/gpl-ger.html
 -----------------------------------------------------------------------------------------*/
 #include "globals.h"
-#include "timer.h"
-#include <esp8266.h>
-#include "espmissingincludes.h"
-#include "debug.h"
+#include "esp8266.h"
+#include "enc28j60.h"
+#include "stack.h"
 #include "dhcpc.h"
+#include "timer.h"
 
 volatile u32 my1secTime = 0;
 #ifdef USE_DHCP
@@ -44,10 +44,33 @@ volatile u32 my1secTime = 0;
 #endif
 static ETSTimer secondTickerTimer;
 
+/* Tracks what connection is used at any one time - wifi or Ethernet */
+#define NO_LINK     0
+#define ETH_LINK    1
+#define WIFI_LINK   2
+u32 ICACHE_FLASH_ATTR timer_connectionTracker (void ) {
+  static u8 currentLink = NO_LINK;
+	if (enc_linkup()) {
+    /* Ethernet link */
+    if (currentLink != ETH_LINK) {
+      // setup ethernet link here
+      currentLink = ETH_LINK;
+    }
+  } else {
+    /* No ethernet - stick to wifi */
+    if (currentLink != WIFI_LINK) {
+      // setup for wifi
+      currentLink = WIFI_LINK;
+    }
+  }
+	return 1;
+}
+
 //Timer Interrupt
-static void ICACHE_FLASH_ATTR secondTickerCb (void *arg) {
-	
-  //INFO("In 1sec ticker = %u\n",my1secTime);
+static void ICACHE_FLASH_ATTR secondTickerCb (void *arg) {  
+  timer_connectionTracker();
+  
+  TIMER_DEBUG("secondTickerCb(1sec ticker) = %u\n",my1secTime);
   
 	//tick 1 second
 	my1secTime++;
@@ -64,6 +87,8 @@ static void ICACHE_FLASH_ATTR secondTickerCb (void *arg) {
   eth.timer = 1;
 }
 
+
+
 //----------------------------------------------------------------------------
 // Timer init
 void timer_init (void)
@@ -72,7 +97,7 @@ void timer_init (void)
 	os_timer_setfn(&secondTickerTimer, secondTickerCb, NULL);
 	os_timer_arm(&secondTickerTimer, 1000, 1);
   
-  INFO("timer init\r\n");
+	TIMER_DEBUG("timer init\r\n");
 	return;
 };
 

@@ -1,14 +1,10 @@
 /*
------------------------------------------------------------------------------------------
-Author:         Mark F (Cicero-MF) mark@cdelec.co.za    
-Known Issues:   none
-Version:        04.04.2016
-Description:    Esp8266 http server - core routines modified for ENC28J60 conns
+Esp8266 http server - core routines
+*/
 
-  Based off Jeroen Domburg's HTTPD ESP8266 version, modified to handle
-  the addition of wired Ethernet connections from an ENC28J60
-  
-
+/*
+  18-05-2016 - Slight mod to redirect espconn calls to esp_enc_api instead 
+    - Mark F (Cicero-MF) mark@cdelec.co.za  
  * ----------------------------------------------------------------------------
  * "THE BEER-WARE LICENSE" (Revision 42):
  * Jeroen Domburg <jeroen@spritesmods.com> wrote this file. As long as you retain 
@@ -19,9 +15,8 @@ Description:    Esp8266 http server - core routines modified for ENC28J60 conns
 
 
 #include <esp8266.h>
-#include "stack.h"
+#include "esp_enc_api.h"
 #include "httpd.h"
-
 
 //Max length of request head
 #define MAX_HEAD_LEN 1024
@@ -31,7 +26,6 @@ Description:    Esp8266 http server - core routines modified for ENC28J60 conns
 #define MAX_POST 1024
 //Max send buffer len
 #define MAX_SENDBUFF_LEN 2048
-
 
 //This gets set at init time.
 static HttpdBuiltInUrl *builtInUrls;
@@ -51,11 +45,9 @@ static HttpdPostData connPostData[MAX_CONN];
 
 //Listening connection data
 static struct espconn httpdConn;
-
-/* Espconn handles for wired connection */
-static struct espconn httpdWiredConn[MAX_CONN];
-
+static struct espconn httpdWiredConn;
 static esp_tcp httpdTcp;
+static esp_tcp httpdWiredTcp;
 
 //Struct to keep extension->mime data in
 typedef struct {
@@ -74,6 +66,7 @@ static const MimeMap mimeTypes[]={
 	{"jpg", "image/jpeg"},
 	{"jpeg", "image/jpeg"},
 	{"png", "image/png"},
+	{"svg", "image/svg+xml"},
 	{NULL, "text/html"}, //default value
 };
 
@@ -92,14 +85,20 @@ const char ICACHE_FLASH_ATTR *httpdGetMimetype(char *url) {
 
 //Looks up the connData info for a specific esp connection
 static HttpdConnData ICACHE_FLASH_ATTR *httpdFindConnData(void *arg) {
-	int i;
-	for (i=0; i<MAX_CONN; i++) {
-		if (connData[i].conn==(struct espconn *)arg) return &connData[i];
+	struct espconn *espconn = arg;
+	for (int i=0; i<MAX_CONN; i++) {
+    //os_printf("\t - Finding connData[%u] -  Remote Port %u==TCP Port %u?\n", i, connData[i].remote_port, espconn->proto.tcp->remote_port);
+    if (connData[i].remote_port == espconn->proto.tcp->remote_port &&
+						os_memcmp(connData[i].remote_ip, espconn->proto.tcp->remote_ip, 4) == 0) {
+			if (arg != connData[i].conn) connData[i].conn = arg; // yes, this happens!?
+			return &connData[i];
+		}
 	}
 	//Shouldn't happen.
-	os_printf("FindConnData: Huh? Couldn't find connection for %p\n", arg);
+	os_printf("*** Unknown connection 0x%p\n", arg);
 	return NULL;
 }
+
 
 //Retires a connection for re-use
 static void ICACHE_FLASH_ATTR httpdRetireConn(HttpdConnData *conn) {
@@ -107,10 +106,12 @@ static void ICACHE_FLASH_ATTR httpdRetireConn(HttpdConnData *conn) {
 	conn->post->buff=NULL;
 	conn->cgi=NULL;
 	conn->conn=NULL;
+	conn->remote_port=0;
+	os_memset(conn->remote_ip, 0, 4);
 }
 
 //Stupid li'l helper function that returns the value of a hex char.
-static int httpdHexVal(char c) {
+static int ICACHE_FLASH_ATTR  httpdHexVal(char c) {
 	if (c>='0' && c<='9') return c-'0';
 	if (c>='A' && c<='F') return c-'A'+10;
 	if (c>='a' && c<='f') return c-'a'+10;
@@ -121,7 +122,7 @@ static int httpdHexVal(char c) {
 //Takes the valLen bytes stored in val, and converts it into at most retLen bytes that
 //are stored in the ret buffer. Returns the actual amount of bytes used in ret. Also
 //zero-terminates the ret buffer.
-int httpdUrlDecode(char *val, int valLen, char *ret, int retLen) {
+int ICACHE_FLASH_ATTR  httpdUrlDecode(char *val, int valLen, char *ret, int retLen) {
 	int s=0, d=0;
 	int esced=0, escVal=0;
 	while (s<valLen && d<retLen) {
@@ -225,22 +226,72 @@ void ICACHE_FLASH_ATTR httpdEndHeaders(HttpdConnData *conn) {
 void ICACHE_FLASH_ATTR httpdRedirect(HttpdConnData *conn, char *newUrl) {
 	char buff[1024];
 	int l;
-  os_printf("In httpdRedirect!\r\n");
 	l=os_sprintf(buff, "HTTP/1.1 302 Found\r\nServer: esp8266-httpd/"HTTPDVER"\r\nConnection: close\r\nLocation: %s\r\n\r\nMoved to %s\r\n", newUrl, newUrl);
 	httpdSend(conn, buff, l);
 }
 
 //Use this as a cgi function to redirect one url to another.
 int ICACHE_FLASH_ATTR cgiRedirect(HttpdConnData *connData) {
-  os_printf("In cgiRedirect!\r\n");
-  
 	if (connData->conn==NULL) {
 		//Connection aborted. Clean up.
 		return HTTPD_CGI_DONE;
 	}
-  os_printf("calling httpdRedirect!\r\n");
 	httpdRedirect(connData, (char*)connData->cgiArg);
 	return HTTPD_CGI_DONE;
+}
+
+//This CGI function redirects to a fixed url of http://[hostname]/ if hostname field of request isn't
+//already that hostname. Use this in combination with a DNS server that redirects everything to the
+//ESP in order to load a HTML page as soon as a phone, tablet etc connects to the ESP. Watch out:
+//this will also redirect connections when the ESP is in STA mode, potentially to a hostname that is not
+//in the 'official' DNS and so will fail.
+int ICACHE_FLASH_ATTR cgiRedirectToHostname(HttpdConnData *connData) {
+	char buff[1024];
+	int isIP=0;
+	int x;
+	if (connData->conn==NULL) {
+		//Connection aborted. Clean up.
+		return HTTPD_CGI_DONE;
+	}
+	if (connData->hostName==NULL) {
+		os_printf("Huh? No hostname.\n");
+		return HTTPD_CGI_NOTFOUND;
+	}
+
+	//Quick and dirty code to see if host is an IP
+	if (os_strlen(connData->hostName)>8) {
+		isIP=1;
+		for (x=0; x<strlen(connData->hostName); x++) {
+			if (connData->hostName[x]!='.' && (connData->hostName[x]<'0' || connData->hostName[x]>'9')) isIP=0;
+		}
+	}
+	if (isIP) return HTTPD_CGI_NOTFOUND;
+	//Check hostname; pass on if the same
+	if (os_strcmp(connData->hostName, (char*)connData->cgiArg)==0) return HTTPD_CGI_NOTFOUND;
+	//Not the same. Redirect to real hostname.
+	os_sprintf(buff, "http://%s/", (char*)connData->cgiArg);
+	os_printf("Redirecting to hostname url %s\n", buff);
+	httpdRedirect(connData, buff);
+	return HTTPD_CGI_DONE;
+}
+
+
+//Same as above, but will only redirect clients with an IP that is in the range of
+//the SoftAP interface. This should preclude clients connected to the STA interface
+//to be redirected to nowhere.
+int ICACHE_FLASH_ATTR cgiRedirectApClientToHostname(HttpdConnData *connData) {
+	uint32 *remadr;
+	struct ip_info apip;
+	int x=wifi_get_opmode();
+	//Check if we have an softap interface; bail out if not
+	if (x!=2 && x!=3) return HTTPD_CGI_NOTFOUND;
+	remadr=(uint32 *)connData->conn->proto.tcp->remote_ip;
+	wifi_get_ip_info(SOFTAP_IF, &apip);
+	if ((*remadr & apip.netmask.addr) == (apip.ip.addr & apip.netmask.addr)) {
+		return cgiRedirectToHostname(connData);
+	} else {
+		return HTTPD_CGI_NOTFOUND;
+	}
 }
 
 
@@ -248,7 +299,6 @@ int ICACHE_FLASH_ATTR cgiRedirect(HttpdConnData *connData) {
 //the data is seen as a C-string.
 //Returns 1 for success, 0 for out-of-memory.
 int ICACHE_FLASH_ATTR httpdSend(HttpdConnData *conn, const char *data, int len) {
-  //os_printf("In httpdSend!\r\n");
 	if (len<0) len=strlen(data);
 	if (conn->priv->sendBuffLen+len>MAX_SENDBUFF_LEN) return 0;
 	os_memcpy(conn->priv->sendBuff+conn->priv->sendBuffLen, data, len);
@@ -256,42 +306,33 @@ int ICACHE_FLASH_ATTR httpdSend(HttpdConnData *conn, const char *data, int len) 
 	return 1;
 }
 
-//Helper function to send any data in conn->priv->sendBuff
-static void ICACHE_FLASH_ATTR xmitSendBuff(HttpdConnData *conn) {
-	os_printf("xmitSendBuff!\r\n");
-  if (conn->priv->sendBuffLen!=0) {    
-		if (conn->conn->type != ESP_CONN_WIRED) {
-      espconn_sent(conn->conn, (uint8_t*)conn->priv->sendBuff, conn->priv->sendBuffLen);
-    } else {
-      // send using ENC
-      stack_saveHtmlPacket((uint8_t*)conn->priv->sendBuff, conn->priv->sendBuffLen);
-    }
+//Function to send any data in conn->priv->sendBuff. Do not use in CGIs unless you know what you
+//are doing!
+void ICACHE_FLASH_ATTR httpdFlushSendBuffer(HttpdConnData *conn) {
+	if (conn->priv->sendBuffLen!=0) {
+		//espconn_sent(conn->conn, (uint8_t*)conn->priv->sendBuff, conn->priv->sendBuffLen);
+		esp_enc_api_sendData(conn->conn, (uint8_t*)conn->priv->sendBuff, conn->priv->sendBuffLen);
     conn->priv->sendBuffLen=0;
 	}
 }
 
 //Callback called when the data on a socket has been successfully
-//sent - for wired connection, this is called from stack.c - from the TCP_PORT_TABLE[port_index].fp(index) function.
+//sent.
 static void ICACHE_FLASH_ATTR httpdSentCb(void *arg) {
 	int r;
 	HttpdConnData *conn=httpdFindConnData(arg);
 	char sendBuff[MAX_SENDBUFF_LEN];
 
-  os_printf("In httpdSent!\r\n"); 
-  
 	if (conn==NULL) return;
 	conn->priv->sendBuff=sendBuff;
 	conn->priv->sendBuffLen=0;
 
 	if (conn->cgi==NULL) { //Marked for destruction?
 		os_printf("Conn %p is done. Closing.\n", conn->conn);
-    if (conn->conn->type != ESP_CONN_WIRED) {
-      espconn_disconnect(conn->conn);
-    } else {
-      /* Send FIN here */
-    }
+		//espconn_disconnect(conn->conn);
+    esp_enc_api_disconnect(conn->conn);
 		httpdRetireConn(conn);
-		return; //No need to call xmitSendBuff.
+		return; //No need to call httpdFlushSendBuffer.
 	}
 
 	r=conn->cgi(conn); //Execute cgi fn.
@@ -301,13 +342,8 @@ static void ICACHE_FLASH_ATTR httpdSentCb(void *arg) {
 	if (r==HTTPD_CGI_NOTFOUND || r==HTTPD_CGI_AUTHENTICATED) {
 		os_printf("ERROR! CGI fn returns code %d after sending data! Bad CGI!\n", r);
 		conn->cgi=NULL; //mark for destruction.
-	} 
-  xmitSendBuff(conn);
-  
-}
-
-void ICACHE_FLASH_ATTR httpdWiredSentCb(int i) {
-  httpdSentCb(&httpdWiredConn[i]);
+	}
+	httpdFlushSendBuffer(conn);
 }
 
 static const char *httpNotFoundHeader="HTTP/1.0 404 Not Found\r\nServer: esp8266-httpd/"HTTPDVER"\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: 12\r\n\r\nNot Found.\r\n";
@@ -347,7 +383,7 @@ static void ICACHE_FLASH_ATTR httpdProcessRequest(HttpdConnData *conn) {
 			//generate a built-in 404 to handle this.
 			os_printf("%s not found. 404!\n", conn->url);
 			httpdSend(conn, httpNotFoundHeader, -1);
-      xmitSendBuff(conn);           
+			httpdFlushSendBuffer(conn);
 			conn->cgi=NULL; //mark for destruction
 			return;
 		}
@@ -357,13 +393,11 @@ static void ICACHE_FLASH_ATTR httpdProcessRequest(HttpdConnData *conn) {
 		r=conn->cgi(conn);
 		if (r==HTTPD_CGI_MORE) {
 			//Yep, it's happy to do so and has more data to send.
-			xmitSendBuff(conn);
-      
+			httpdFlushSendBuffer(conn);
 			return;
 		} else if (r==HTTPD_CGI_DONE) {
 			//Yep, it's happy to do so and already is done sending data.
-			xmitSendBuff(conn);
-      
+			httpdFlushSendBuffer(conn);
 			conn->cgi=NULL; //mark conn for destruction
 			return;
 		} else if (r==HTTPD_CGI_NOTFOUND || r==HTTPD_CGI_AUTHENTICATED) {
@@ -377,17 +411,21 @@ static void ICACHE_FLASH_ATTR httpdProcessRequest(HttpdConnData *conn) {
 //Parse a line of header data and modify the connection data accordingly.
 static void ICACHE_FLASH_ATTR httpdParseHeader(char *h, HttpdConnData *conn) {
 	int i;
-	char first_line = false;
+	char firstLine=0;
 	
 	if (os_strncmp(h, "GET ", 4)==0) {
 		conn->requestType = HTTPD_METHOD_GET;
-		first_line = true;
+		firstLine=1;
+	} else if (os_strncmp(h, "Host:", 5)==0) {
+		i=5;
+		while (h[i]==' ') i++;
+		conn->hostName=&h[i];
 	} else if (os_strncmp(h, "POST ", 5)==0) {
 		conn->requestType = HTTPD_METHOD_POST;
-		first_line = true;
+		firstLine=1;
 	}
 
-	if (first_line) {
+	if (firstLine) {
 		char *e;
 		
 		//Skip past the space after POST/GET
@@ -443,18 +481,12 @@ static void ICACHE_FLASH_ATTR httpdParseHeader(char *h, HttpdConnData *conn) {
 }
 
 
-
-
-
 //Callback called when there's data available on a socket.
-static void ICACHE_FLASH_ATTR httpdRecvCb (void *arg, char *data, unsigned short len) {
+static void ICACHE_FLASH_ATTR httpdRecvCb(void *arg, char *data, unsigned short len) {
 	int x;
 	char *p, *e;
 	char sendBuff[MAX_SENDBUFF_LEN];
 	HttpdConnData *conn=httpdFindConnData(arg);
-  
-  os_printf("httpdRecvCb %u\n", len);
-  
 	if (conn==NULL) return;
 	conn->priv->sendBuff=sendBuff;
 	conn->priv->sendBuffLen=0;
@@ -465,8 +497,6 @@ static void ICACHE_FLASH_ATTR httpdRecvCb (void *arg, char *data, unsigned short
 	//>0: Need to receive post data
 	//ToDo: See if we can use something more elegant for this.
 
-  os_printf("post->len %d\n", conn->post->len);
-  
 	for (x=0; x<len; x++) {
 		if (conn->post->len<0) {
 			//This byte is a header byte.
@@ -496,6 +526,7 @@ static void ICACHE_FLASH_ATTR httpdRecvCb (void *arg, char *data, unsigned short
 			//This byte is a POST byte.
 			conn->post->buff[conn->post->buffLen++]=data[x];
 			conn->post->received++;
+			conn->hostName=NULL;
 			if (conn->post->buffLen >= conn->post->buffSize || conn->post->received == conn->post->len) {
 				//Received a chunk of post data
 				conn->post->buff[conn->post->buffLen]=0; //zero-terminate, in case the cgi handler knows it can use strings
@@ -503,12 +534,14 @@ static void ICACHE_FLASH_ATTR httpdRecvCb (void *arg, char *data, unsigned short
 				httpdProcessRequest(conn);
 				conn->post->buffLen = 0;
 			}
+		} else {
+			//Let cgi handle data if it registered a recvHdl callback. If not, ignore.
+			if (conn->recvHdl) {
+				conn->recvHdl(conn, data+x, len-x);
+				break;
+			}
 		}
 	}
-}
-
-void ICACHE_FLASH_ATTR httpdWiredRec (char *data, unsigned short len, int i) {
-  httpdRecvCb(&httpdWiredConn[i], data, len);
 }
 
 static void ICACHE_FLASH_ATTR httpdReconCb(void *arg, sint8 err) {
@@ -539,20 +572,16 @@ static void ICACHE_FLASH_ATTR httpdDisconCb(void *arg) {
 }
 
 
-
-
 static void ICACHE_FLASH_ATTR httpdConnectCb(void *arg) {
 	struct espconn *conn=arg;
 	int i;
-  
 	//Find empty conndata in pool
 	for (i=0; i<MAX_CONN; i++) if (connData[i].conn==NULL) break;
 	os_printf("Con req, conn=%p, pool slot %d\n", conn, i);
 	if (i==MAX_CONN) {
 		os_printf("Aiee, conn pool overflow!\n");
-    if (conn->type != ESP_CONN_WIRED) {
-      espconn_disconnect(conn);
-    }
+		//espconn_disconnect(conn);
+		esp_enc_api_disconnect(conn);
 		return;
 	}
 	connData[i].priv=&connPrivData[i];
@@ -563,42 +592,18 @@ static void ICACHE_FLASH_ATTR httpdConnectCb(void *arg) {
 	connData[i].post->buffLen=0;
 	connData[i].post->received=0;
 	connData[i].post->len=-1;
-  os_printf("connData[%d].post->len=%d\n",i,connData[i].post->len);
-  if (conn->type != ESP_CONN_WIRED) {
-    espconn_regist_recvcb(conn, httpdRecvCb);
-    espconn_regist_reconcb(conn, httpdReconCb);
-    espconn_regist_disconcb(conn, httpdDisconCb);
-    espconn_regist_sentcb(conn, httpdSentCb);
-  }  
-}
+	connData[i].hostName=NULL;
+	connData[i].remote_port=conn->proto.tcp->remote_port;
+	os_memcpy(connData[i].remote_ip, conn->proto.tcp->remote_ip, 4);
 
-/* Start up a connection for the wired interface */
-int ICACHE_FLASH_ATTR httpdWiredConnect(void) {
-  //httpdConn.type = ESP_CONN_WIRED;
-  //return httpdConnectCb(&httpdConn);
-  struct espconn *conn;
-	int i; 
-  
-	//Find empty conndata in pool
-	for (i=0; i<MAX_CONN; i++) if (connData[i].conn==NULL) break;
-	os_printf("Wired con req, conn=%p, pool slot %d\n", conn, i);
-	if (i==MAX_CONN) {
-		os_printf("Aiee, conn pool overflow!\n");    
-		return -1;
-	}
-  conn = &httpdWiredConn[i];
-  conn->type = ESP_CONN_WIRED;
-	connData[i].priv=&connPrivData[i];
-	connData[i].conn=conn;
-	connData[i].priv->headPos=0;
-	connData[i].post=&connPostData[i];
-	connData[i].post->buff=NULL;
-	connData[i].post->buffLen=0;
-	connData[i].post->received=0;
-	connData[i].post->len=-1;
-	connData[i].i=i;
-  os_printf("connData[%d].post->len=%d\n",i,connData[i].post->len);
-  return i;
+	//espconn_regist_recvcb(conn, httpdRecvCb);
+  esp_enc_api_regist_recvcb (conn, httpdRecvCb);
+	//espconn_regist_reconcb(conn, httpdReconCb);
+	esp_enc_api_regist_reconcb(conn, httpdReconCb);
+	//espconn_regist_disconcb(conn, httpdDisconCb);
+	esp_enc_api_regist_disconcb(conn, httpdDisconCb);
+	//espconn_regist_sentcb(conn, httpdSentCb);
+	esp_enc_api_regist_sentcb(conn, httpdSentCb);
 }
 
 //Httpd initialization routine. Call this to kick off webserver functionality.
@@ -613,8 +618,31 @@ void ICACHE_FLASH_ATTR httpdInit(HttpdBuiltInUrl *fixedUrls, int port) {
 	httpdTcp.local_port=port;
 	httpdConn.proto.tcp=&httpdTcp;
 	builtInUrls=fixedUrls;
+  
+  /* Setup wired interface handles */
+	httpdWiredConn.type=ESPCONN_TCP_WIRED;
+	httpdWiredConn.state=ESPCONN_NONE;
+	httpdWiredTcp.local_port=port;
+	httpdWiredConn.proto.tcp=&httpdWiredTcp;
 
 	os_printf("Httpd init, conn=%p\n", &httpdConn);
-	espconn_regist_connectcb(&httpdConn, httpdConnectCb);
-	espconn_accept(&httpdConn);
+	os_printf("HttpdWired init, conn=%p\n", &httpdWiredConn);
+  
+	//espconn_regist_connectcb(&httpdConn, httpdConnectCb);
+	esp_enc_api_regist_connectcb(&httpdConn, httpdConnectCb);
+	esp_enc_api_regist_connectcb(&httpdWiredConn, httpdConnectCb);
+  
+	//espconn_accept(&httpdConn);
+	esp_enc_api_connaccept(&httpdConn, STACK_NA);
+	esp_enc_api_connaccept(&httpdWiredConn, STACK_HTTPD);
+  
+  /* TODO: This is potential bug, because we have MAX_CONN allowed total
+            for both connection interfaces, but we're assigning 2*MAX_CONN
+            actually.  So safer to split the conns and share, or leave
+            as is if you're certain that it wont be exceeded (for example
+            if you know that only one interface will be used at any one time) 
+  */
+	//espconn_tcp_set_max_con_allow(&httpdConn, MAX_CONN);
+	esp_enc_api_tcp_set_max_con_allowed(&httpdConn, MAX_CONN);
+	esp_enc_api_tcp_set_max_con_allowed(&httpdWiredConn, MAX_CONN);
 }

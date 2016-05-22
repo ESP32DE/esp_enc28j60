@@ -2,12 +2,13 @@
 #define _ENC28J60_H_
 
 #include <stdio.h>
+#include "globals.h"
+#include "user_interface.h"
 #include "config.h"
-#include "ethconfig.h"
-#include "debug.h"
 	
-	//#define ENC_DEBUG(...)
-	#define ENC_DEBUG INFO
+
+  
+  #define ETHERNET_LINK_UP 0x0400
 
 	// this variable is set during enc_init to the values above.
 	extern u8 mymac[6];
@@ -22,10 +23,12 @@
 	// EREVID value, filled with the enc_init() function.
 	extern u8 enc_revid;
 
+  u16 ICACHE_FLASH_ATTR enc_linkup (void);
 	void      enc_init(void);
 	void		  enc28j60_led_blink (u8 a);
 	void      enc_send_packet( u16 len, u8 *buf );
 	u16       enc_receive_packet( u16 bufsize, u8 *buf );
+  u16 ICACHE_FLASH_ATTR enc_read_phyreg( u8 phyreg );
 
 	#define ETH_INIT                enc_init
 	#define ETH_PACKET_RECEIVE      enc_receive_packet
