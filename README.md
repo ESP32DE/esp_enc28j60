@@ -12,7 +12,7 @@ Forum discussion - http://www.esp8266.com/viewtopic.php?f=11&t=9413
 
 ## Running and testing esp_enc28j60
 - Connect up your ENC28J60 to your ESP8266 as shown
-- Project has been copied in full, so compile and run as you would the httpd project normally
+- I work in Cherts Windows Environment http://www.esp8266.com/viewtopic.php?t=820, and so the project has been copied in full to compile with his standard install directories.  If you are on Linux/BSD, please follow PuceBaboon's setup/makefile changes here: https://esp8266hints.wordpress.com/2016/06/09/compiling-ciceros-esp-enc28j60-package-on-linux/
 - Lastly, dont hesitate to contact me with any questions you may have.  Good luck!
 
 ##Thanks
